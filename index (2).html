@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8" />
+<title>Clash Royale — Atari Style (Single File)</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<style>
+  :root{--bg:#070707;--panel:#111;--text:#e6e6e6}
+  html,body{height:100%;margin:0;font-family:monospace;background:var(--bg);color:var(--text)}
+  #container{display:flex;flex-direction:column;align-items:center;gap:8px;padding:8px}
+  canvas{background:linear-gradient(#081,#020);border:6px solid #222;image-rendering:pixelated}
+  .ui{display:flex;gap:8px;align-items:center}
+  .cards{display:flex;gap:6px}
+  .card{width:56px;height:72px;background:var(--panel);border:2px solid #222;padding:4px;display:flex;flex-direction:column;align-items:center;justify-content:space-between;cursor:pointer}
+  .card.cool{opacity:.4}
+  .hud{display:flex;gap:12px;align-items:center}
+  .btn{background:#222;border:1px solid #333;padding:6px 10px;color:var(--text);cursor:pointer}
+  #download{margin-left:8px}
+  @media(max-width:480px){canvas{width:100%;height:70vh}}</style>
+</head>
+<body>
+<div id="container">
+  <h3>Clash Royale — Atari Style (single file)</h3>
+  <div class="ui">
+    <div class="cards" id="cards"></div>
+    <div class="hud">
+      <div>Elixir: <span id="elixir">0</span></div>
+      <button id="pause" class="btn">Pausar</button>
+      <button id="download" class="btn">Baixar .html</button>
+    </div>
+  </div>
+  <canvas id="game" width="420" height="600"></canvas>
+  <div style="opacity:.7;font-size:12px">Toque/click em uma carta para selecionar, depois toque na arena para soltar a tropa. Versão 8-bit, controles mobile prontos.</div>
+</div>
+<script>
+// -----------------------
+// Config & Helpers
+// -----------------------
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+let W = canvas.width, H = canvas.height;
+function resize() { const ratio = canvas.width/canvas.height; const box = canvas.getBoundingClientRect(); }
+window.addEventListener('resize', resize);
+
+// Pixelated look scaling helper
+function drawPixelRect(x,y,w,h){ ctx.fillRect(Math.round(x),Math.round(y),Math.round(w),Math.round(h)); }
+
+// -----------------------
+// Game state
+// -----------------------
+const STATE = {
+  towers: [],
+  units: [],
+  projectiles: [],
+  particles: [],
+  player: {elixir:0},
+  selectedCard: null,
+  paused:false,
+  time:0
+};
+
+// Tower layout: 3 per side (left player on bottom, enemy on top)
+function createTowers(){
+  STATE.towers = [
+    {id:'p_left', x:60, y:520, hp:200, side:'player'},
+    {id:'p_right', x:360, y:520, hp:200, side:'player'},
+    {id:'p_king', x:210, y:520, hp:350, side:'player', king:true},
+
+    {id:'e_left', x:60, y:40, hp:200, side:'enemy'},
+    {id:'e_right', x:360, y:40, hp:200, side:'enemy'},
+    {id:'e_king', x:210, y:40, hp:350, side:'enemy', king:true}
+  ];
+}
+createTowers();
+
+// -----------------------
+// Cards (units)
+// -----------------------
+// Atari pixel style units: simple rectangles with stats
+const CARDS = [
+  {id:'spear', name:'Soldado', cost:2,hp:50,atk:8,spd:1.2,size:8,range:10,desc:'Tropa barata'},
+  {id:'golem', name:'Golem', cost:5,hp:180,atk:20,spd:0.6,size:14,range:12,desc:'Tanque lento'},
+  {id:'arch', name:'Arqueira', cost:3,hp:40,atk:6,spd:1.0,size:6,range:90,desc:'Ataca de longe'},
+  {id:'mage', name:'Mago', cost:4,hp:35,atk:14,spd:0.9,size:8,range:80,aoe:16,desc:'Dano em area'}
+];
+
+// cooldowns and UI
+const cardState = {};
+CARDS.forEach(c=> cardState[c.id]={cool:0});
+
+// create card UI
+const cardsDiv = document.getElementById('cards');
+CARDS.forEach(c=>{
+  const el = document.createElement('div'); el.className='card'; el.id='card-'+c.id;
+  el.innerHTML = `<div style="font-size:12px">${c.name}</div><div style="font-size:11px">${c.cost}⚡</div><div style="font-size:10px">${c.desc}</div>`;
+  el.onclick = ()=>{ if(cardState[c.id].cool>0) return; if(STATE.player.elixir < c.cost) return; document.querySelectorAll('.card').forEach(x=>x.classList.remove('selected')); el.classList.add('selected'); STATE.selectedCard = c; }
+  cardsDiv.appendChild(el);
+});
+
+// -----------------------
+// Input: place unit
+// -----------------------
+canvas.addEventListener('pointerdown', (e)=>{
+  if(STATE.paused) return;
+  const rect = canvas.getBoundingClientRect();
+  const x = (e.clientX-rect.left)*(canvas.width/rect.width);
+  const y = (e.clientY-rect.top)*(canvas.height/rect.height);
+  if(STATE.selectedCard){
+    // only allow placing on player's half
+    if(y < H/2) return; // restrict
+    spawnUnit(STATE.selectedCard, x, y, 'player');
+    STATE.player.elixir -= STATE.selectedCard.cost;
+    cardState[STATE.selectedCard.id].cool = 2000; // ms
+    document.querySelectorAll('.card').forEach(x=>x.classList.remove('selected'));
+    STATE.selectedCard = null;
+  }
+});
+
+// -----------------------
+// Unit spawn and logic
+// -----------------------
+function spawnUnit(card, x,y,side){
+  const dir = side=='player'?-1:1;
+  STATE.units.push({id:card.id,x,y,hp:card.hp,atk:card.atk,spd:card.spd*dir,size:card.size,side,range:card.range,aoe:card.aoe||0});
+}
+
+// Enemy AI: spawn waves and simple targeting
+setInterval(()=>{
+  if(STATE.paused) return;
+  // spawn enemy units at random lane every 2.5s
+  const laneX = [60,210,360][Math.floor(Math.random()*3)];
+  const choice = CARDS[Math.floor(Math.random()*CARDS.length)];
+  spawnUnit(choice, laneX, 80, 'enemy');
+}, 2500);
+
+// -----------------------
+// Particles / effects
+// -----------------------
+function spawnHit(x,y,color){
+  for(let i=0;i<6;i++) STATE.particles.push({x,y,dx:(Math.random()-0.5)*2,dy:(Math.random()-0.5)*2,life:30,color});
+}
+
+// -----------------------
+// Update loop
+// -----------------------
+let last = performance.now();
+function gameLoop(now){
+  const dt = now - last; last = now; if(STATE.paused){ requestAnimationFrame(gameLoop); return; }
+  STATE.time += dt;
+
+  // elixir regen
+  STATE.player.elixir = Math.min(10, STATE.player.elixir + dt*0.001);
+  document.getElementById('elixir').innerText = Math.floor(STATE.player.elixir);
+
+  // cooldown timers
+  for(const k in cardState){ if(cardState[k].cool>0) cardState[k].cool = Math.max(0, cardState[k].cool - dt); const el = document.getElementById('card-'+k); if(el){ el.classList.toggle('cool', cardState[k].cool>0);} }
+
+  // units movement & combat
+  for(const u of STATE.units){
+    // find nearest enemy target (units then towers)
+    const enemies = STATE.units.filter(v=>v.side!==u.side);
+    let target = null;
+    let dist = 1e9;
+    for(const e of enemies){ const d = Math.hypot(e.x-u.x,e.y-u.y); if(d<dist){ dist=d; target=e; } }
+    // if close to enemy units, attack
+    if(target && dist < (u.range + target.size)){
+      // damage over time
+      target.hp -= u.atk*dt/400;
+      spawnHit(u.x,u.y, u.side=='player'?'cyan':'red');
+    } else {
+      // move forward toward enemy side
+      u.y += (u.spd>0?u.spd: -u.spd) * (u.side==='player'?-1:1) * (dt/16);
+    }
+
+    // towers collision
+    for(const t of STATE.towers){ if(t.side !== u.side){ const d = Math.hypot(t.x-u.x,t.y-u.y); if(d < 18 + u.size){ t.hp -= u.atk*dt/800; u.hp -= 0.2*dt/16; spawnHit(u.x,u.y,'orange'); } } }
+  }
+
+  // remove dead units
+  for(let i=STATE.units.length-1;i>=0;i--){ if(STATE.units[i].hp <=0 || STATE.units[i].y < -40 || STATE.units[i].y > H+40) { STATE.units.splice(i,1); } }
+
+  // particles update
+  for(let i=STATE.particles.length-1;i>=0;i--){ const p=STATE.particles[i]; p.x+=p.dx*p.life*0.01; p.y+=p.dy*p.life*0.01; p.life--; if(p.life<=0) STATE.particles.splice(i,1); }
+
+  // check tower deaths
+  for(const t of STATE.towers){ if(t.hp<=0){ t.hp=0; /* simple win/lose could be implemented */ } }
+
+  draw();
+  requestAnimationFrame(gameLoop);
+}
+requestAnimationFrame(gameLoop);
+
+// -----------------------
+// Draw function (8-bit aesthetic)
+// -----------------------
+function draw(){
+  ctx.clearRect(0,0,W,H);
+  // background grid
+  ctx.save(); ctx.globalAlpha=0.06; for(let gx=0;gx<W;gx+=8){ for(let gy=0;gy<H;gy+=8){ ctx.fillStyle=( (gx+gy)%16===0 ? '#0a2' : '#002'); drawPixelRect(gx,gy,7,7);} } ctx.restore();
+
+  // draw towers
+  for(const t of STATE.towers){ ctx.fillStyle = t.side==='player' ? '#66f' : '#f33'; drawPixelRect(t.x-12,t.y-12,24,24); // turret
+    // HP bar
+    ctx.fillStyle='#222'; drawPixelRect(t.x-24,t.y+18,48,6); ctx.fillStyle='#0f0'; drawPixelRect(t.x-24,t.y+18, Math.max(0,48*(t.hp/(t.king?350:200))),6);
+  }
+
+  // units
+  for(const u of STATE.units){ ctx.fillStyle = u.side==='player' ? '#0ff' : '#f66'; drawPixelRect(u.x-u.size/2,u.y-u.size/2,u.size,u.size); }
+
+  // particles
+  for(const p of STATE.particles){ ctx.fillStyle = p.color; drawPixelRect(p.x,p.y,2,2); }
+
+  // HUD: card cooldown overlay
+  CARDS.forEach((c,i)=>{ const el = document.getElementById('card-'+c.id); if(!el) return; const rect = el.getBoundingClientRect(); if(cardState[c.id].cool>0){ /* visual handled by CSS */ } });
+
+  // debug/time
+  ctx.fillStyle='#fff'; ctx.font='10px monospace'; ctx.fillText('Time: '+Math.floor(STATE.time/1000)+'s',8,H-8);
+}
+
+// -----------------------
+// Controls: pause/download
+// -----------------------
+document.getElementById('pause').onclick = ()=>{ STATE.paused = !STATE.paused; document.getElementById('pause').innerText = STATE.paused? 'Retomar' : 'Pausar'; }
+
+document.getElementById('download').onclick = ()=>{
+  // produce downloadable single-file HTML
+  const html = '<!DOCTYPE html>'+document.documentElement.outerHTML;
+  const blob = new Blob([html],{type:'text/html'});
+  const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = 'clash_atari.html'; a.click(); URL.revokeObjectURL(url);
+}
+
+// -----------------------
+// Ensure canvas scales nicely on mobile
+// -----------------------
+function fitCanvas(){ const box = canvas.getBoundingClientRect(); const scale = Math.min(window.innerWidth-20, 420)/420; canvas.style.width = Math.round(420*scale)+'px'; canvas.style.height = Math.round(600*scale)+'px'; }
+fitCanvas(); window.addEventListener('resize', fitCanvas);
+
+</script>
+</body>
+</html>
